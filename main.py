@@ -98,6 +98,59 @@ def salt_pepper_filter(binary_image):
     return filtered
 
 
+# Функция для нахождения кластеров по пикам и минимумам гистограммы
+def find_clusters(gray_image):
+    hist = compute_histogram(gray_image)
+    clusters = []
+    min_val = 0
+
+    for i in range(1, 255):  # Ищем локальные минимумы
+        if hist[i] < hist[i - 1] and hist[i] < hist[i + 1] and hist[i] > 0:
+            clusters.append((min_val, i))
+            min_val = i + 1
+    clusters.append((min_val, 255))  # Последний кластер до 255
+
+    # Удаляем пустые или слишком маленькие кластеры (менее 1% пикселей)
+    total_pixels = gray_image.shape[0] * gray_image.shape[1]
+    valid_clusters = []
+    for start, end in clusters:
+        count = sum(hist[start:end + 1])
+        if count > total_pixels / 100:  # Минимум 1% пикселей
+            valid_clusters.append((start, end))
+    return valid_clusters
+
+
+# Функция для выбора семян (ближайший пиксель к пику в кластере)
+def find_seeds(gray_image, clusters):
+    height, width = gray_image.shape
+    seeds = []
+    hist = compute_histogram(gray_image)
+
+    for start, end in clusters:
+        # Находим пик (максимум) в диапазоне
+        peak_value = max(hist[start:end + 1])
+        peak_index = start
+        for i in range(start, end + 1):
+            if hist[i] == peak_value:
+                peak_index = i
+                break
+
+        # Ищем ближайший пиксель к пику
+        min_diff = float('inf')
+        best_seed = None
+        for i in range(height):
+            for j in range(width):
+                if start <= gray_image[i, j] <= end and gray_image[i, j] != 0:
+                    diff = abs(gray_image[i, j] - peak_index)
+                    if diff < min_diff:
+                        min_diff = diff
+                        best_seed = (i, j)
+        if best_seed:
+            seeds.append(best_seed)
+    return seeds
+
+
+# Обновлённая функция region_growing с гистограммным методом
 def region_growing(image, is_binary=False, t_edge=2.0):
     height, width = image.shape
     labels = np.zeros((height, width), dtype=int)
@@ -106,59 +159,66 @@ def region_growing(image, is_binary=False, t_edge=2.0):
 
     segment_stats = {}
 
-    for i in range(height):
-        for j in range(width):
-            if labels[i, j] == 0 and image[i, j] != 0:
-                current_label += 1
-                queue = deque()
-                queue.append((i, j))
-                labels[i, j] = current_label
+    # Гистограммный метод: определяем кластеры и семена
+    clusters = find_clusters(image)
+    seeds = find_seeds(image, clusters)
+    if not seeds:  # Если семян нет
+        seeds = [(0, 0)]  # Заглушка
 
-                if is_binary:
-                    while queue:
-                        x, y = queue.popleft()
-                        for dx, dy in directions:
-                            nx, ny = x + dx, y + dy
-                            if 0 <= nx < height and 0 <= ny < width and labels[nx, ny] == 0 and image[nx, ny] == 255:
+    # Выращивание семян
+    for seed_i, seed_j in seeds:
+        if labels[seed_i, seed_j] == 0 and image[seed_i, seed_j] != 0:
+            current_label += 1
+            queue = deque()
+            queue.append((seed_i, seed_j))
+            labels[seed_i, seed_j] = current_label
+
+            if is_binary:
+                while queue:
+                    x, y = queue.popleft()
+                    color = image[x, y]
+                    for dx, dy in directions:
+                        nx, ny = x + dx, y + dy
+                        if 0 <= nx < height and 0 <= ny < width and labels[nx, ny] == 0 and image[nx, ny] == color:
+                            labels[nx, ny] = current_label
+                            queue.append((nx, ny))
+            else:
+                val = float(image[seed_i, seed_j])
+                segment_stats[current_label] = {'mean': val, 'var': 0.0, 'count': 1}
+                while queue:
+                    x, y = queue.popleft()
+                    for dx, dy in directions:
+                        nx, ny = x + dx, y + dy
+                        if 0 <= nx < height and 0 <= ny < width and labels[nx, ny] == 0:
+                            y_val = float(image[nx, ny])
+                            stats = segment_stats[current_label]
+                            N = stats['count']
+                            X_old = stats['mean']
+                            S2_old = stats['var']
+                            diff = y_val - X_old
+                            if N == 1:
+                                if abs(diff) > 20:
+                                    continue
+                                T = 0.0
+                            else:
+                                eps = 1e-8
+                                if abs(S2_old) < eps:
+                                    if abs(diff) < 1e-6:
+                                        T = 0.0
+                                    else:
+                                        T = float('inf')
+                                else:
+                                    T_squared = ((N - 1) * N / (N + 1)) * (diff ** 2) / S2_old
+                                    T = T_squared ** 0.5
+                            if T <= t_edge:
                                 labels[nx, ny] = current_label
                                 queue.append((nx, ny))
-                else:
-                    val = float(image[i, j])
-                    segment_stats[current_label] = {'mean': val, 'var': 0.0, 'count': 1}
-                    while queue:
-                        x, y = queue.popleft()
-                        for dx, dy in directions:
-                            nx, ny = x + dx, y + dy
-                            if 0 <= nx < height and 0 <= ny < width and labels[nx, ny] == 0:
-                                y_val = float(image[nx, ny])
-                                stats = segment_stats[current_label]
-                                N = stats['count']
-                                X_old = stats['mean']
-                                S2_old = stats['var']
-                                diff = y_val - X_old
-                                if N == 1:
-                                    if abs(diff) > 20:
-                                        continue
-                                    T = 0.0
-                                else:
-                                    eps = 1e-8
-                                    if abs(S2_old) < eps:
-                                        if abs(diff) < 1e-6:
-                                            T = 0.0
-                                        else:
-                                            T = float('inf')
-                                    else:
-                                        T_squared = ((N - 1) * N / (N + 1)) * (diff ** 2) / S2_old
-                                        T = T_squared ** 0.5
-                                if T <= t_edge:
-                                    labels[nx, ny] = current_label
-                                    queue.append((nx, ny))
 
-                                    X_new = (N * X_old + y_val) / (N + 1)
-                                    S2_new = S2_old + (y_val - X_old) ** 2 + N * (X_new - X_old) ** 2
-                                    segment_stats[current_label]['mean'] = X_new
-                                    segment_stats[current_label]['var'] = S2_new
-                                    segment_stats[current_label]['count'] = N + 1
+                                X_new = (N * X_old + y_val) / (N + 1)
+                                S2_new = S2_old + (y_val - X_old) ** 2 + N * (X_new - X_old) ** 2
+                                segment_stats[current_label]['mean'] = X_new
+                                segment_stats[current_label]['var'] = S2_new
+                                segment_stats[current_label]['count'] = N + 1
     return labels, current_label
 
 
@@ -214,4 +274,8 @@ if __name__ == "__main__":
         axs[1].set_title('1-й алгоритм')
         axs[2].imshow(seg2)
         axs[2].set_title('2-й алгоритм')
+
+        plt.legend()
+        plt.savefig(f"image{idx}.png")
         plt.show()
+        plt.close()
